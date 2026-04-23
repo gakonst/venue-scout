@@ -572,6 +572,7 @@
 </div>
 
 <script>
+// ── Config ─────────────────────────────────────────────────────────────────
 // ── State ──────────────────────────────────────────────────────────────────
 let answers = {}
 let notes = {}   // freewrite notes keyed by question id
@@ -624,8 +625,17 @@ const QUESTIONS = [
     placeholder: 'City, neighborhood, or proximity — e.g. "Lower East Side NYC", "SoMa SF", or "mountain resort within 2hr of SFO"'
   },
   {
-    id: 'vibe',
+    id: 'budget',
     label: 'Question 6',
+    text: 'What\'s the budget range?',
+    type: 'chips',
+    chips: ['Under $5k', '$5k – $15k', '$15k – $30k', '$30k – $75k', '$75k – $150k', '$150k+', 'Flexible / no hard cap'],
+    multi: false,
+    required: false
+  },
+  {
+    id: 'vibe',
+    label: 'Question 7',
     text: 'What\'s the vibe you\'re going for?',
     type: 'chips',
     chips: ['Michelin-caliber', 'Craft-driven kitchen', 'Design-forward', 'Under the radar', 'Intimate and warm', 'Buzzy / scene-y', 'Quiet and focused', 'Celebratory', 'Natural light', 'Neighborhood gem', 'Impressive / wow factor', 'Outdoorsy / adventure', 'Wine-forward'],
@@ -634,7 +644,7 @@ const QUESTIONS = [
   },
   {
     id: 'dealbreakers',
-    label: 'Question 7',
+    label: 'Question 8',
     text: 'Hard nos — what would immediately rule a venue out?',
     type: 'textarea',
     placeholder: 'E.g. no hotel ballrooms, needs natural light, no F&B minimums above $15k, must have strong wine program, avoid touristy areas…',
@@ -642,7 +652,7 @@ const QUESTIONS = [
   },
   {
     id: 'extra',
-    label: 'Question 8',
+    label: 'Question 9',
     text: 'Anything else that matters?',
     type: 'textarea',
     placeholder: 'Budget, A/V needs, past Paradigm events at venues you loved or hated, dietary requirements, specific aesthetic references…',
@@ -904,6 +914,8 @@ function buildBrief() {
 
   if (a.location) parts.push(`Location: ${a.location}`)
 
+  if (a.budget) parts.push(`Budget: ${a.budget}`)
+
   if (a.vibe?.length) parts.push(`Vibe: ${a.vibe.join(', ')}`)
 
   if (a.dealbreakers) parts.push(`Dealbreakers: ${a.dealbreakers}`)
@@ -919,9 +931,89 @@ function buildBrief() {
   return parts.join('\n')
 }
 
-// ── Centaur API call ───────────────────────────────────────────────────────
-let lastSearchQueries = []
+// ── Agentic web-search loop ────────────────────────────────────────────────
+let lastSearchQueries = []  // tracked for display in results
 
+async function callWithWebSearch(system, userMsg, onStatus) {
+  const WEB_SEARCH_TOOL = { type: 'web_search_20250305', name: 'web_search', max_uses: 8 }
+  let messages = [{ role: 'user', content: userMsg }]
+  lastSearchQueries = []
+
+  for (let iter = 0; iter < 12; iter++) {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'web-search-2025-03-05',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-opus-4-5',
+        max_tokens: 5000,
+        system,
+        tools: [WEB_SEARCH_TOOL],
+        messages
+      })
+    })
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error?.message || `API error ${res.status}`)
+    }
+
+    const data = await res.json()
+    const content = data.content || []
+    const textBlocks = content.filter(c => c.type === 'text')
+    const toolUseBlocks = content.filter(c => c.type === 'tool_use')
+
+    if (data.stop_reason === 'end_turn') {
+      return textBlocks.map(b => b.text).join('')
+    }
+
+    if (data.stop_reason === 'tool_use' && toolUseBlocks.length > 0) {
+      // Surface what's being searched
+      const searchMessages = [
+        'Finding the best match for your brief…',
+        'Scanning recent openings and reviews…',
+        'Weighing vibe, location, and logistics…',
+        'Cross-checking availability and minimums…',
+        'Narrowing down the shortlist…',
+        'Almost there…'
+      ]
+      for (const tu of toolUseBlocks) {
+        const q = tu.input?.query
+        if (q) {
+          lastSearchQueries.push(q)
+          if (onStatus) onStatus(searchMessages[Math.min(lastSearchQueries.length - 1, searchMessages.length - 1)])
+        }
+      }
+
+      // Extend conversation: assistant used the tool
+      messages.push({ role: 'assistant', content })
+
+      // Return tool results — for server-side tools the API handles execution;
+      // we acknowledge each tool_use with a tool_result so the loop continues
+      messages.push({
+        role: 'user',
+        content: toolUseBlocks.map(tu => ({
+          type: 'tool_result',
+          tool_use_id: tu.id,
+          content: tu.content ?? ''   // server-side: results already in tu.content
+        }))
+      })
+      continue
+    }
+
+    // Fallback: grab any text we have
+    if (textBlocks.length > 0) return textBlocks.map(b => b.text).join('')
+    throw new Error('Unexpected stop_reason: ' + data.stop_reason)
+  }
+  throw new Error('Web search loop exceeded max iterations')
+}
+
+// ── API call ───────────────────────────────────────────────────────────────
 async function runScout() {
   hide('intake')
   show('loading')
@@ -945,14 +1037,13 @@ async function runScout() {
     cycleIdx = (cycleIdx + 1) % cycleMessages.length
     if (statusEl) statusEl.textContent = cycleMessages[cycleIdx]
   }, 2500)
+  const setStatus = (msg) => {}  // web search hook is now silent; cycling handles display
+
   statusEl.textContent = cycleMessages[0]
-  lastSearchQueries = []
 
   const brief = buildBrief()
 
-  // The system prompt and search logic live in skill.py on the Centaur server.
-  // This app just sends the brief and receives the ranked venue list.
-  const _unused = `You are the in-house venue researcher for Paradigm, a design-forward crypto/tech investment firm that runs events across SF, NYC, Las Vegas, and destination resort locations. You have deep familiarity with Paradigm's curated venue database and their aesthetic: Michelin-caliber or craft-driven kitchens, design-forward spaces, natural light preferred, neighborhood gems over tourist traps, no generic hotel ballrooms unless it's a full resort buyout.
+  const systemPrompt = `You are the in-house venue researcher for Paradigm, a design-forward crypto/tech investment firm that runs events across SF, NYC, Las Vegas, and destination resort locations. You have deep familiarity with Paradigm's curated venue database and their aesthetic: Michelin-caliber or craft-driven kitchens, design-forward spaces, natural light preferred, neighborhood gems over tourist traps, no generic hotel ballrooms unless it's a full resort buyout.
 
 RESEARCH STEP (do this first, before recommending):
 Use your web search tool aggressively across all of these sources before finalizing recommendations:
@@ -1011,26 +1102,14 @@ Return ONLY valid JSON — an array of 5 venue objects. Each object must have:
 
 Rank by best fit first. Be honest about tradeoffs. Never recommend generic hotel ballrooms for intimate dinners. If the brief is vague, ask for the 5 most interesting options in that category.`
 
+  const userMsg = `Here's the event brief:\n\n${brief}\n\nSearch Eater, The Infatuation, and relevant sources first. Then output ONLY a raw JSON array — no preamble, no explanation, no markdown fences. Start your response with [ and end with ].`
+
   try {
-    // Call the Centaur skill via the local server proxy
-    const res = await fetch('/api/scout', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ brief })
-    })
-
+    const rawText = await callWithWebSearch(systemPrompt, userMsg, setStatus)
     clearInterval(statusInterval)
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}))
-      throw new Error(err.error || `Server error ${res.status}`)
-    }
-
-    const data = await res.json()
-    if (data.error) throw new Error(data.error)
-
-    lastSearchQueries = data.sources_checked || []
-    const venues = data.venues
+    const match = rawText.match(/\[[\s\S]*\]/)
+    if (!match) throw new Error('No venue list found in response')
+    const venues = JSON.parse(match[0])
     hide('loading')
     renderResults(venues, brief)
   } catch (err) {
@@ -1092,9 +1171,6 @@ function renderResults(venues, brief) {
         <div class="vc-outreach">
           <button class="vc-outreach-btn" onclick="toggleOutreach(this, '${escapeAttr(v.name)}', '${escapeAttr(v.outreach_hook || '')}')">Draft outreach email ↓</button>
           <div class="vc-email-draft hidden"></div>
-        </div>
-        <div style="margin-top:10px">
-          <button class="vc-outreach-btn" style="color:var(--accent2)" onclick="recordBooking('${escapeAttr(v.name)}')">✓ We booked this venue</button>
         </div>
       </div>
     `
@@ -1179,20 +1255,6 @@ Style: professional but not stiff — like a well-connected events person who kn
     btn.textContent = 'Draft outreach email ↓'
     btn.disabled = false
     alert('Could not generate email: ' + e.message)
-  }
-}
-
-async function recordBooking(venueName) {
-  const feedback = prompt(`Optional: any notes on why you chose ${venueName}? (press Enter to skip)`)
-  try {
-    await fetch('/api/booking', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ venue_name: venueName, brief: buildBrief(), feedback: feedback || '' })
-    })
-    alert(`Logged! Centaur will remember that Paradigm booked ${venueName}.`)
-  } catch {
-    alert('Could not log booking — Centaur server may not be running.')
   }
 }
 
