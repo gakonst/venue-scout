@@ -573,7 +573,10 @@
 
 <script>
 // ── Config ─────────────────────────────────────────────────────────────────
+const ANTHROPIC_API_KEY = process?.env?.ANTHROPIC_API_KEY || ''
+
 // ── State ──────────────────────────────────────────────────────────────────
+let apiKey = ANTHROPIC_API_KEY
 let answers = {}
 let notes = {}   // freewrite notes keyed by question id
 let currentQ = 0
