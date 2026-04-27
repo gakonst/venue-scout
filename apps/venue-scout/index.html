@@ -543,23 +543,8 @@
 <body>
 <div id="app">
 
-  <!-- API Key Gate -->
-  <div id="key-gate">
-    <div class="wordmark">Paradigm · Venue Scout</div>
-    <h1>Find your venue.</h1>
-    <p>Enter your Centaur or Anthropic API key to get started.</p>
-    <div style="margin-bottom:8px">
-      <div class="key-input-row">
-        <input type="password" id="api-key-input" placeholder="aiv2_... or sk-ant-..." autocomplete="off" />
-        <button class="btn btn-primary" onclick="startWithKey()">Start</button>
-      </div>
-      <div class="error-msg hidden" id="key-error"></div>
-    </div>
-    <p style="font-size:12px;color:var(--muted);margin-top:12px">Key stays in your browser session only.</p>
-  </div>
-
   <!-- Intake Form -->
-  <div id="intake" class="hidden">
+  <div id="intake">
     <div class="intake-header">
       <div class="wordmark">Venue Scout</div>
       <div class="progress-row">
@@ -585,7 +570,6 @@
 
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
-let apiKey = sessionStorage.getItem('vs_key') || ''
 let answers = {}
 let notes = {}   // freewrite notes keyed by question id
 let currentQ = 0
@@ -673,37 +657,7 @@ const QUESTIONS = [
 ]
 
 // ── Init ───────────────────────────────────────────────────────────────────
-document.getElementById('api-key-input').addEventListener('keydown', e => {
-  if (e.key === 'Enter') startWithKey()
-})
-
-function startWithKey() {
-  const val = document.getElementById('api-key-input').value.trim()
-  if (!val || (!val.startsWith('aiv2_') && !val.startsWith('sk-'))) {
-    showError('key-error', 'Enter a valid Centaur key (aiv2_...) or Anthropic key (sk-ant-...)')
-    return
-  }
-  apiKey = val
-  sessionStorage.setItem('vs_key', apiKey)
-  hide('key-gate')
-  show('intake')
-  renderQuestion(0)
-}
-
-if (apiKey) {
-  hide('key-gate')
-  show('intake')
-  renderQuestion(0)
-} else {
-  const saved = sessionStorage.getItem('vs_key')
-  if (saved) {
-    apiKey = saved
-    document.getElementById('api-key-input').value = saved
-    hide('key-gate')
-    show('intake')
-    renderQuestion(0)
-  }
-}
+renderQuestion(0)
 
 // ── Question renderer ──────────────────────────────────────────────────────
 function renderQuestion(idx) {
@@ -975,85 +929,6 @@ function buildBrief() {
 // ── Agentic web-search loop ────────────────────────────────────────────────
 let lastSearchQueries = []  // tracked for display in results
 
-async function callWithWebSearch(system, userMsg, onStatus) {
-  const WEB_SEARCH_TOOL = { type: 'web_search_20250305', name: 'web_search', max_uses: 8 }
-  let messages = [{ role: 'user', content: userMsg }]
-  lastSearchQueries = []
-
-  for (let iter = 0; iter < 12; iter++) {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'web-search-2025-03-05',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
-      body: JSON.stringify({
-        model: 'claude-opus-4-5',
-        max_tokens: 5000,
-        system,
-        tools: [WEB_SEARCH_TOOL],
-        messages
-      })
-    })
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}))
-      throw new Error(err.error?.message || `API error ${res.status}`)
-    }
-
-    const data = await res.json()
-    const content = data.content || []
-    const textBlocks = content.filter(c => c.type === 'text')
-    const toolUseBlocks = content.filter(c => c.type === 'tool_use')
-
-    if (data.stop_reason === 'end_turn') {
-      return textBlocks.map(b => b.text).join('')
-    }
-
-    if (data.stop_reason === 'tool_use' && toolUseBlocks.length > 0) {
-      // Surface what's being searched
-      const searchMessages = [
-        'Finding the best match for your brief…',
-        'Scanning recent openings and reviews…',
-        'Weighing vibe, location, and logistics…',
-        'Cross-checking availability and minimums…',
-        'Narrowing down the shortlist…',
-        'Almost there…'
-      ]
-      for (const tu of toolUseBlocks) {
-        const q = tu.input?.query
-        if (q) {
-          lastSearchQueries.push(q)
-          if (onStatus) onStatus(searchMessages[Math.min(lastSearchQueries.length - 1, searchMessages.length - 1)])
-        }
-      }
-
-      // Extend conversation: assistant used the tool
-      messages.push({ role: 'assistant', content })
-
-      // Return tool results — for server-side tools the API handles execution;
-      // we acknowledge each tool_use with a tool_result so the loop continues
-      messages.push({
-        role: 'user',
-        content: toolUseBlocks.map(tu => ({
-          type: 'tool_result',
-          tool_use_id: tu.id,
-          content: tu.content ?? ''   // server-side: results already in tu.content
-        }))
-      })
-      continue
-    }
-
-    // Fallback: grab any text we have
-    if (textBlocks.length > 0) return textBlocks.map(b => b.text).join('')
-    throw new Error('Unexpected stop_reason: ' + data.stop_reason)
-  }
-  throw new Error('Web search loop exceeded max iterations')
-}
-
 // ── API call ───────────────────────────────────────────────────────────────
 async function runScout() {
   hide('intake')
@@ -1078,104 +953,32 @@ async function runScout() {
     cycleIdx = (cycleIdx + 1) % cycleMessages.length
     if (statusEl) statusEl.textContent = cycleMessages[cycleIdx]
   }, 2500)
-  const setStatus = (msg) => {}  // web search hook is now silent; cycling handles display
 
   statusEl.textContent = cycleMessages[0]
 
   const brief = buildBrief()
 
-  const systemPrompt = `You are the in-house venue researcher for Paradigm, a design-forward crypto/tech investment firm that runs events across SF, NYC, Las Vegas, and destination resort locations. You have deep familiarity with Paradigm's curated venue database and their aesthetic: Michelin-caliber or craft-driven kitchens, design-forward spaces, natural light preferred, neighborhood gems over tourist traps, no generic hotel ballrooms unless it's a full resort buyout.
-
-RESEARCH STEP (do this first, before recommending):
-Use your web search tool aggressively across all of these sources before finalizing recommendations:
-- Eater (eater.com/[city]) — new openings, best private dining, neighborhood roundups
-- The Infatuation (theinfatuation.com) — reviews, vibe matching, neighborhood picks
-- Resy blog and OpenTable Digest — trending restaurants, private dining availability
-- Beli app top lists — what's hot and highly rated right now in the city
-- Yelp — event spaces, private dining rooms, recent reviews
-- Reddit (r/[city]food, r/[city]) — local hidden gems, "best private dining" threads, recent recommendations
-- Instagram — search "[city] new restaurant 2025" or "[neighborhood] restaurant" for buzzy new spots
-- Local press — SF Chronicle, Eater SF, NY Times Food, Grub Street, Time Out, local city magazines
-- "[venue name] private dining events" — verify any venue you're considering actually has the setup
-Run at least 5–6 searches across different sources. Surface at least 1–2 venues that are new, under-the-radar, or not on obvious lists.
-Always verify venues are currently operating. Flag any that have recently closed or changed ownership.
-
-PARADIGM'S PRE-VETTED VENUE DATABASE — always prioritize these when they fit the brief:
-
-SF VENUES (restaurants/bars with private dining):
-Saison, Quince, Benu, Californios, Birdsong, Sons & Daughters, Lazy Bear, Niku, Nisei, Gary Danko, Rich Table, Nightbird, The Progress, Frances, Octavia, Nopa, Rintaro, Cotogna, Flour + Water, Che Fico, Foreign Cinema, Sorrel, Spruce, Liho Liho Yacht Club, Ernest, Wayfare Tavern, Angler, Miller & Lux, Kokkari Estiatorio, Mister Jiu's, Penny Roma, Good Good Culture Club, Roaming Goat, Macondray, Bar Sprezzatura, True Laurel, ABV, Pacific Cocktail Haven, Trick Dog, Wildhawk, The Battery SF, Shack15, Fort Mason Gallery 308, Hazie's (1 Hotel Rooftop), Charmaine's Rooftop, Local Edition, Novela
-
-NYC VENUES (restaurants/bars with private dining):
-Atomix, Crown Shy, Gramercy Tavern, Via Carota, Don Angie, Carbone, Manhatta, Rezdora, Cote, Jua, Blue Hill, Torrisi, Peasant, Balthazar, Dirty French, Gage & Tollner, LaserWolf, Death & Co, Maison Premiere, Aska, Charlie Bird, Altro Paradiso, Shuka, Union Square Cafe, Dame, Sushi Nakazawa, Sushi Noz, Tatiana by Kwame Onwuachi, Semma, Bar Calico, Oxomoco, Chinese Tuxedo, Dhamaka, Fish Cheeks, Caffe Dante, Bar Goto, Bar Pisellino, Dante West Village, Buvette, Sant Ambroeus, Public Records, Dead Letter No9, Cervo's, Nudibranch, Gjelina NYC, The Pool, Crane Club, Oiji Mi, Atoboy, Wayla, Thai Diner, Swan Room, Broken Shaker
-
-LAS VEGAS VENUES:
-Carbone Vegas, Esther's Kitchen, Cut by Wolfgang Puck, Estiatorio Milos, Spago, Gjelina Vegas, Motherwolf, KYU, Hakkasan, The Bazaar by Jose Andres, Nobu, Scarpetta, Momofuku
-
-RESORT / OFFSITE VENUES (for multi-day events):
-West Coast: Viceroy Snowmass, AutoCamp (multiple locations), Cavallo Point (Sausalito), Carneros Resort (Napa), Post Ranch Inn (Big Sur), Ventana Big Sur, Meadowood Napa, Auberge du Soleil, Calistoga Ranch, Bardessono, Hotel Les Mars (Healdsburg), Andaz Napa, Chateau Montelena adjacent properties, Solage Calistoga
-Mountain/Ski: Sun Valley Resort, Big Sky Resort, Snowbird, Jackson Lake Lodge, Park City resorts, Fairmont Banff Springs, Fairmont Chateau Lake Louise, Vail/Beaver Creek properties
-East Coast: Wildflower Farms (Hudson Valley), AutoCamp Cape Cod, Gurney's Montauk, Shou Sugi Ban House
-
-EVENT TYPE → VENUE TIER MAPPING (apply this logic):
-- Dinner / reception / fellow dinner (≤60 guests): Pull from SF or NYC restaurant list — prioritize private dining rooms, Michelin-starred or elevated tier
-- Happy hour / cocktail party (≤150): Bars, wine bars, rooftops — full buyout or semi-private
-- Offsite / retreat (multi-day): Resort/hotel venues — West Coast mountain or wine country preferred
-- Flagship / tentpole (150–500+ guests): Large resort buyouts — Sun Valley, Big Sky, Snowbird, Fairmont Banff tier
-- Workshop / team lunch (≤40): Intimate, quiet spaces with good natural light
-- Conference / summit (50–200): Private event spaces, club-like settings
-
-SCORING DIMENSIONS (always return these exact keys):
-- food_quality: Michelin tier, kitchen reputation, ingredient sourcing (most important for dinners)
-- private_dining: Dedicated private room quality, buyout flexibility, PDR availability
-- neighborhood_feel: Authentic neighborhood, walkable, not touristy or corporate
-- design_aesthetic: Interior design, natural light, visual cohesion — Paradigm cares deeply about this
-- logistics: Capacity fit, A/V capability, accessibility, parking/transit, F&B minimum reasonableness
-
-Return ONLY valid JSON — an array of 5 venue objects. Each object must have:
-- name: string (real venue name — prioritize from Paradigm's database above when they fit)
-- location: string (neighborhood + city)
-- overall: number 1–10 (one decimal)
-- verdict: string (2–3 sentences on why this venue fits — specific to the brief, reference the space layout or signature dishes if relevant)
-- watch_out: string (one honest concern: F&B minimums, noise, availability, lead time, corporate feel, etc.)
-- fit_summary: string (one short evocative phrase — e.g. "Quiet Hayes Valley gem with a 22-seat private cave")
-- scores: object with keys: food_quality, private_dining, neighborhood_feel, design_aesthetic, logistics — each 1–10
-- outreach_hook: string (one specific sentence to open an outreach email — reference something real about the space)
-
-Rank by best fit first. Be honest about tradeoffs. Never recommend generic hotel ballrooms for intimate dinners. If the brief is vague, ask for the 5 most interesting options in that category.`
-
-  const userMsg = `Here's the event brief:\n\n${brief}\n\nSearch Eater, The Infatuation, and relevant sources first. Then output ONLY a raw JSON array — no preamble, no explanation, no markdown fences. Start your response with [ and end with ].`
-
   try {
-    let rawText
-    if (apiKey.startsWith('aiv2_')) {
-      // ── Centaur API path ──────────────────────────────────────────────
-      const res = await fetch('https://svc-ai.dayno.xyz/agent', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Api-Key': apiKey
-        },
-        body: JSON.stringify({
-          skill: 'venue_scout',
-          input: brief,
-          stream: false
-        })
-      })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.detail || `Centaur API error ${res.status}`)
-      }
-      const data = await res.json()
-      rawText = typeof data === 'string' ? data : (data.output || data.result || data.text || JSON.stringify(data))
-    } else {
-      // ── Anthropic API path (fallback) ─────────────────────────────────
-      rawText = await callWithWebSearch(systemPrompt, userMsg, setStatus)
+    const res = await fetch('/api/scout', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ brief })
+    })
+
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      throw new Error(data.error || data.detail || `Venue Scout error ${res.status}`)
+    }
+
+    lastSearchQueries = Array.isArray(data.sources_checked) ? data.sources_checked : []
+    const venues = extractVenueList(data)
+    if (!Array.isArray(venues) || venues.length === 0) {
+      throw new Error('No venue list found in response')
     }
 
     clearInterval(statusInterval)
-    const match = rawText.match(/\[[\s\S]*\]/)
-    if (!match) throw new Error('No venue list found in response')
-    const venues = JSON.parse(match[0])
     hide('loading')
     renderResults(venues, brief)
   } catch (err) {
@@ -1287,33 +1090,10 @@ async function toggleOutreach(btn, venueName, hook) {
   const eventType = a.event_type?.chips?.join(', ') || a.event_type?.text || 'event'
   const guestCount = a.guest_count || ''
   const location = a.location || ''
+  const spaceConfig = a.space_config?.length ? a.space_config.join(', ') : ''
 
   try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 400,
-        messages: [{
-          role: 'user',
-          content: `Write a short, warm outreach email to ${venueName} to inquire about booking a private ${eventType} for ${guestCount} guests${location ? ' in ' + location : ''}.
-
-Opening hook (venue-specific detail showing you know the space): "${hook}"
-
-Style: professional but not stiff — like a well-connected events person who knows what they want. No fluff. Include: date range (TBD), headcount, setup preference, ask for availability + private dining info + pricing. 3–4 short paragraphs max. Subject line first, then body. No signature.`
-        }]
-      })
-    })
-
-    const data = await res.json()
-    const text = data.content[0].text
-    draft.textContent = text
+    draft.textContent = buildOutreachDraft({ venueName, hook, eventType, guestCount, location, spaceConfig })
     draft.classList.remove('hidden')
     btn.textContent = 'Hide email ↑'
     btn.disabled = false
@@ -1334,6 +1114,37 @@ function startOver() {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+function extractVenueList(data) {
+  if (Array.isArray(data)) return data
+  if (Array.isArray(data?.venues)) return data.venues
+
+  const rawText = typeof data === 'string'
+    ? data
+    : (data?.output || data?.result || data?.text || '')
+
+  if (!rawText) return []
+
+  const match = rawText.match(/\[[\s\S]*\]/)
+  if (!match) return []
+
+  try {
+    return JSON.parse(match[0])
+  } catch {
+    return []
+  }
+}
+
+function buildOutreachDraft({ venueName, hook, eventType, guestCount, location, spaceConfig }) {
+  const subjectBits = ['Inquiry', eventType, guestCount ? `${guestCount} guests` : '', venueName]
+    .filter(Boolean)
+    .join(' · ')
+  const locationLine = location ? ` in ${location}` : ''
+  const setupLine = spaceConfig ? ` We are likely looking for ${spaceConfig.toLowerCase()}.` : ''
+  const hookLine = hook ? `${hook} ` : ''
+
+  return `Subject: ${subjectBits}\n\nHi ${venueName} team,\n\nI’m reaching out about hosting a ${eventType} for ${guestCount || 'a small group of'} guests${locationLine}. ${hookLine}It feels like it could be a strong fit for the atmosphere we want.${setupLine}\n\nWe’re still flexible on exact timing, but I’d love to understand what private dining or buyout options you offer, what guest counts and room formats you recommend, and the relevant pricing or F&B minimums.\n\nIf it sounds like a fit, please send over availability, event details, and the best next step for a booking conversation.\n`
+}
+
 function show(id) { document.getElementById(id)?.classList.remove('hidden') }
 function hide(id) { document.getElementById(id)?.classList.add('hidden') }
 function hideEl(id) { document.getElementById(id)?.classList.add('hidden') }
