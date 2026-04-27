@@ -543,8 +543,20 @@
 <body>
 <div id="app">
 
-  <!-- Intake starts directly -->
-  <div id="key-gate" class="hidden"></div>
+  <!-- API Key Gate -->
+  <div id="key-gate">
+    <div class="wordmark">Paradigm · Venue Scout</div>
+    <h1>Find your venue.</h1>
+    <p>Enter your Centaur or Anthropic API key to get started.</p>
+    <div style="margin-bottom:8px">
+      <div class="key-input-row">
+        <input type="password" id="api-key-input" placeholder="aiv2_... or sk-ant-..." autocomplete="off" />
+        <button class="btn btn-primary" onclick="startWithKey()">Start</button>
+      </div>
+      <div class="error-msg hidden" id="key-error"></div>
+    </div>
+    <p style="font-size:12px;color:var(--muted);margin-top:12px">Key stays in your browser session only.</p>
+  </div>
 
   <!-- Intake Form -->
   <div id="intake" class="hidden">
@@ -572,11 +584,8 @@
 </div>
 
 <script>
-// ── Config ─────────────────────────────────────────────────────────────────
-const ANTHROPIC_API_KEY = process?.env?.ANTHROPIC_API_KEY || ''
-
 // ── State ──────────────────────────────────────────────────────────────────
-let apiKey = ANTHROPIC_API_KEY
+let apiKey = sessionStorage.getItem('vs_key') || ''
 let answers = {}
 let notes = {}   // freewrite notes keyed by question id
 let currentQ = 0
@@ -664,8 +673,37 @@ const QUESTIONS = [
 ]
 
 // ── Init ───────────────────────────────────────────────────────────────────
-show('intake')
-renderQuestion(0)
+document.getElementById('api-key-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') startWithKey()
+})
+
+function startWithKey() {
+  const val = document.getElementById('api-key-input').value.trim()
+  if (!val || (!val.startsWith('aiv2_') && !val.startsWith('sk-'))) {
+    showError('key-error', 'Enter a valid Centaur key (aiv2_...) or Anthropic key (sk-ant-...)')
+    return
+  }
+  apiKey = val
+  sessionStorage.setItem('vs_key', apiKey)
+  hide('key-gate')
+  show('intake')
+  renderQuestion(0)
+}
+
+if (apiKey) {
+  hide('key-gate')
+  show('intake')
+  renderQuestion(0)
+} else {
+  const saved = sessionStorage.getItem('vs_key')
+  if (saved) {
+    apiKey = saved
+    document.getElementById('api-key-input').value = saved
+    hide('key-gate')
+    show('intake')
+    renderQuestion(0)
+  }
+}
 
 // ── Question renderer ──────────────────────────────────────────────────────
 function renderQuestion(idx) {
@@ -1108,7 +1146,32 @@ Rank by best fit first. Be honest about tradeoffs. Never recommend generic hotel
   const userMsg = `Here's the event brief:\n\n${brief}\n\nSearch Eater, The Infatuation, and relevant sources first. Then output ONLY a raw JSON array — no preamble, no explanation, no markdown fences. Start your response with [ and end with ].`
 
   try {
-    const rawText = await callWithWebSearch(systemPrompt, userMsg, setStatus)
+    let rawText
+    if (apiKey.startsWith('aiv2_')) {
+      // ── Centaur API path ──────────────────────────────────────────────
+      const res = await fetch('https://svc-ai.dayno.xyz/agent', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Api-Key': apiKey
+        },
+        body: JSON.stringify({
+          skill: 'venue_scout',
+          input: brief,
+          stream: false
+        })
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Centaur API error ${res.status}`)
+      }
+      const data = await res.json()
+      rawText = typeof data === 'string' ? data : (data.output || data.result || data.text || JSON.stringify(data))
+    } else {
+      // ── Anthropic API path (fallback) ─────────────────────────────────
+      rawText = await callWithWebSearch(systemPrompt, userMsg, setStatus)
+    }
+
     clearInterval(statusInterval)
     const match = rawText.match(/\[[\s\S]*\]/)
     if (!match) throw new Error('No venue list found in response')
